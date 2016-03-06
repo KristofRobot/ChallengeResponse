@@ -8,6 +8,12 @@
    Based on GettingStarted_CallResponse.ino
    Dec 2014 - TMRh20 - Updated
    Derived from examples by J. Coliz <maniacbug@ymail.com>
+
+   CHANGES
+   - 06Mar2016 - v0.2
+      * Adding radio powerdown statements to lower standby power usage to less than 1uA
+   - 27Feb2016 - v0.1
+      * Initial version
 */
 
 #include <SPI.h>
@@ -76,6 +82,9 @@ void loop(void) {
       0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
     };
 
+    //power down radio
+    radio.powerDown();
+
     /***  Interrupt stuff ***/
     // Allow wake up pin to trigger interrupt on low.
     attachInterrupt(digitalPinToInterrupt(buttonPin), wakeUp, HIGH);
@@ -88,6 +97,9 @@ void loop(void) {
     detachInterrupt(0);
 
     /*** Do stuff when woken up ***/
+    //power up radio
+    radio.powerUp();
+
     unsigned long time = micros();                          // Record the current microsecond count
 
     nonce = getRandomNumber();
