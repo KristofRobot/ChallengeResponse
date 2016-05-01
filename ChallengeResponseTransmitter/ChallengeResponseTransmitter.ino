@@ -4,16 +4,21 @@
 
    Usage: configure your 512 bit key in hmacKey, set radio pipe addresses and channel
 
-   February 2016 - Kristof Robot
+   May 2016 - Kristof Robot
    Based on GettingStarted_CallResponse.ino
    Dec 2014 - TMRh20 - Updated
    Derived from examples by J. Coliz <maniacbug@ymail.com>
 
    CHANGES
+   - 01May2016 - v1.0
+      * Tuned radio settings - stable working version
    - 06Mar2016 - v0.2
       * Adding radio powerdown statements to lower standby power usage to less than 1uA
    - 27Feb2016 - v0.1
       * Initial version
+
+   Configure fuses as follows:
+   -U lfuse:w:0x62:m -U hfuse:w:0xd9:m -U efuse:w:0x07:m
 */
 
 #include <SPI.h>
@@ -30,14 +35,15 @@ RF24 radio(9,10);
 // Radio pipe addresses for the 2 nodes to communicate.
 const byte addresses[][6] = {"aaaaa","bbbbb"};
 
-// Channel
-const byte channel = 0;
+// Channel - to avoid interference with wifi, put it in the top 25 channels or so (max is 126)
+const byte CHANNEL = 0;
 
 // Max time to wait before timing out, in microseconds
 const long MAX_TIME = 2000000;
 
-// Activation pin - connected to GND through 10K resistor, button connects to Vcc when pressed (see Button sketch schematic)
-const byte buttonPin = 2;
+// Button pin MUST be external interrupt pin!!
+const byte buttonPin = 2;  //pin 2 on connected to GND through 10K resistor, button connects to Vcc when pressed (see Button sketch schematic)
+//const byte ledPin = 8;  //pin connected to LED - 0 on board; 8 on test
 
 // Key - 64 bytes - equal to HMAC-SHA-256 blocksize - CHANGE THIS!!
 const uint8_t hmacKey[]={
@@ -45,6 +51,13 @@ const uint8_t hmacKey[]={
 };
 
 /*** End User Config ***/
+
+bool timeout=false;
+
+//placeholder for challenge - 32 bytes
+uint8_t challenge[]={
+ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
 
 //sha256 class for random generation
 Sha256Class random_sha256;
@@ -54,16 +67,35 @@ void setup(){
   randomSeed(analogRead(0));
   random_sha256.init();
   pinMode(buttonPin, INPUT);
+  /*pinMode(ledPin, OUTPUT);
+
+  //blink at startup
+  digitalWrite(ledPin, LOW);
+  delay(1000);
+  digitalWrite(ledPin, HIGH);
+  delay(1000);
+  digitalWrite(ledPin, LOW);
+  delay(1000);
+  digitalWrite(ledPin, HIGH);
+  delay(1000);
+  digitalWrite(ledPin, LOW);
+  delay(1000);
+  digitalWrite(ledPin, HIGH);
+  delay(1000);
+  digitalWrite(ledPin, LOW);
+  delay(1000);*/
 
   //Serial.begin(115200);
   //Serial.println(F("Starting Garage Door Transmitter"));
 
   //Setup and configure radio
   radio.begin();
-  radio.setChannel(channel);
-  //radio.setPALevel(RF24_PA_LOW);   //for testing
-  radio.setPALevel(RF24_PA_HIGH);
-
+  radio.setChannel(CHANNEL);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setDataRate(RF24_250KBPS); //1MBPS by default - 250Kbps reputedly is more reliably
+  //radio.setPayloadSize(8); //32 is default, lower would increase performance?
+  //radio.setRetries(15,15); //delay, count, default is 5, 15
+  //radio.setAutoAck(false); //disable auto ack, enabled by default
   radio.openWritingPipe(addresses[1]);        // Both radios listen on the same pipes by default, but opposite addresses
   radio.openReadingPipe(1,addresses[0]);      // Open a reading pipe on address 0, pipe 1
 
@@ -72,15 +104,8 @@ void setup(){
 }
 
 void loop(void) {
-    //unsigned long timer
-    unsigned long started_waiting_at;
-    uint8_t *response;
-    uint8_t *nonce;
-    bool timeout=false;
-    //placeholder for challenge - 32 bytes
-    uint8_t challenge[]={
-      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-    };
+    unsigned long timer, started_waiting_at;
+    uint8_t *response, *nonce;
 
     //power down radio
     radio.powerDown();
@@ -94,20 +119,21 @@ void loop(void) {
     LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF);
 
     // Disable external pin interrupt on wake up pin.
-    detachInterrupt(0);
+    detachInterrupt(digitalPinToInterrupt(buttonPin));
 
-    /*** Do stuff when woken up ***/
     //power up radio
     radio.powerUp();
 
+    /*** Do stuff when woken up ***/
     unsigned long time = micros();                          // Record the current microsecond count
+    //digitalWrite(ledPin, HIGH);
 
     nonce = getRandomNumber();
     //Serial.print(F("Sending nonce: "));
     radio.write(nonce, 32);
-    //printHash(nonce);
+
     radio.startListening();
-    delay(100); //gives the transmitter some time to come back
+    //printHash(nonce);
 
     started_waiting_at = micros();               // Set up a timeout period, get the current microseconds
     while (!radio.available() ){                             // While nothing is received
@@ -117,20 +143,21 @@ void loop(void) {
       }
     }
 
-    if (timeout) {
+   //digitalWrite(ledPin, LOW);
+
+   if(timeout){
       radio.stopListening();
       //Serial.println("Command timed out...");
-    } else {
-      radio.read(challenge, 32);                  // Read the challenge
+   }else{
+      // Read the challenge
+      radio.read(challenge, 32);
 
-      /*
       timer = micros();
-      Serial.print(F("Got challenge "));
-      printHash(challenge);
-      Serial.print(F(" round-trip delay: "));
-      Serial.print(timer-time);
-      Serial.println(F(" microseconds"));
-      */
+      //Serial.print(F("Got challenge "));
+      //printHash(challenge);
+      //Serial.print(F(" round-trip delay: "));
+      //Serial.print(timer-time);
+      //Serial.println(F(" microseconds"));
 
       radio.stopListening();
 
@@ -143,21 +170,24 @@ void loop(void) {
         Sha256.print(challenge[i]);
       }
       response = Sha256.resultHmac();
-      radio.write(response,32);
 
+      radio.write(response, 32);
       //Serial.print(F("Provided response "));
       //printHash(response);
     }
+
+    timeout = false;
 }
 
 /*
 void printHash(uint8_t* hash) {
   int i;
   for (i=0; i<32; i++) {
-    Serial.print("0123456789abcdef"[hash[i]>>4]);
-    Serial.print("0123456789abcdef"[hash[i]&0xf]);
+    ////Serial.print("0123456789abcdef"[hash[i]>>4]);
+    ////Serial.print("0123456789abcdef"[hash[i]&0xf]);
+    //Serial.print(hash[i]);
   }
-  Serial.println();
+  //Serial.println();
 }
 */
 
@@ -165,7 +195,7 @@ uint8_t* getRandomNumber(){
   // Using a basic whitening technique that takes the first byte of a new random value and builds up a 32-byte random value
   // This 32-byte random value is then hashed (SHA256) to produce the resulting nonce
   for (int i = 0; i < 32; i++) {
-    //random_sha256.write(Entropy.random(255));
+    //random_sha256.write(Entropy.random(255));  //entropy lib is not compatible with low power
     random_sha256.write(random(255));
   }
   return random_sha256.result();
