@@ -192,6 +192,22 @@ void printHash(uint8_t* hash) {
 }
 */
 
+/*
+ * The entropy library by default builds a pool of 8 32 bit entropy values at a rate of about 2 per second.
+ * I.e. after about 4 seconds it buffers 256 bit (32 byte) of entropy, replenished at 64bit/s.
+ *
+ * Any call to the function below at once consumes the that buffer of 256 bit/32 bytes.
+ * Therefore it is recommended not to call this function more often than about once/5 seconds.
+ * It can be called faster, but then it will block until sufficient entropy has been built up (about 4 sec in worst case).
+ * If this is not acceptable, consider increasing the pool in Entropy.cpp (by setting WDT_POOL_SIZE)
+ *
+ * In fact we need a bit more than a buffer of 32 bytes to achieve 32 bytes, 
+ * as Entropy.random will throw away some values to achieve a uniform distribution.
+ * So we set WDT_POOL_SIZE=16, for optimal performance in all circumstances (twice the size required).
+ *
+ * It is best to use something like FreeMemory (https://github.com/McNeight/MemoryFree) to verify the increased pool still fits in memory
+ * In my tests I found that I have still 1192 bytes (of 2048 total) available after setting the pool size to 16 bytes.
+ */
 uint8_t* getRandomNumber(){
   // Using a basic whitening technique that takes the first byte of a new random value and builds up a 32-byte random value
   // This 32-byte random value is then hashed (SHA256) to produce the resulting nonce
