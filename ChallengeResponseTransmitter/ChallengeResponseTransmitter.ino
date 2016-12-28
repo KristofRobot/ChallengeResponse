@@ -10,6 +10,8 @@
    Derived from examples by J. Coliz <maniacbug@ymail.com>
 
    CHANGES
+   - 28Dec2016 - v1.1
+      * Implemented double click
    - 01May2016 - v1.0
       * Tuned radio settings - stable working version
    - 06Mar2016 - v0.2
@@ -41,6 +43,12 @@ const byte CHANNEL = 0;
 // Max time to wait before timing out, in microseconds
 const long MAX_TIME = 2000000;
 
+// Max time between clicks, in microseconds
+const long MAX_PRESS_TIME = 500000;
+
+// Min time between clicks, in milliseconds
+const long MIN_PRESS_TIME = 200;
+
 // Button pin MUST be external interrupt pin!!
 const byte buttonPin = 2;  //pin 2 on connected to GND through 10K resistor, button connects to Vcc when pressed (see Button sketch schematic)
 //const byte ledPin = 8;  //pin connected to LED - 0 on board; 8 on test
@@ -50,21 +58,30 @@ const uint8_t hmacKey[]={
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
 };
 
-/*** End User Config ***/
-
 bool timeout=false;
+bool singlePress=false;
+bool doublePress=false;
+
+//sha256 class for random generation
+Sha256Class random_sha256;
 
 //placeholder for challenge - 32 bytes
 uint8_t challenge[]={
  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
 };
 
-//sha256 class for random generation
-Sha256Class random_sha256;
-
 void setup(){
-  //Entropy.initialize();
+  //Entropy.initialize();  //Entropy is not compatible with LowPower library
+
+  /*
+   *  analogRead has a rather low variation, so this is a poor way of seeding
+   *  i.e. the pseudo generated random numbers will be fairly predictable.
+   *  Not a problem in our use case, as the strong random number is coming from the receiver
+   *  and the transmitter random number serves as a nonce (unique value)
+   *  to avoid repetition of (transmitter nonce,receiver challenge) tuple.
+  */
   randomSeed(analogRead(0));
+
   random_sha256.init();
   pinMode(buttonPin, INPUT);
   /*pinMode(ledPin, OUTPUT);
@@ -104,7 +121,7 @@ void setup(){
 }
 
 void loop(void) {
-    unsigned long timer, started_waiting_at;
+    unsigned long timer, started_waiting_at, started_pressing_at;
     uint8_t *response, *nonce;
 
     //power down radio
@@ -121,62 +138,99 @@ void loop(void) {
     // Disable external pin interrupt on wake up pin.
     detachInterrupt(digitalPinToInterrupt(buttonPin));
 
-    //power up radio
-    radio.powerUp();
+    /*** Double click detection state machine ***/
+    //First press should be released within MAX_PRESS_TIME us to register
+    //Time between first and second press be in interval [MIN_PRESS_TIME ms,MAX_PRESS_TIME us[
+    //Second press should be released within MIN_PRESS_TIME ms
+    singlePress=false;
+    doublePress=false;
+    started_pressing_at = micros();
 
-    /*** Do stuff when woken up ***/
-    unsigned long time = micros();                          // Record the current microsecond count
-    //digitalWrite(ledPin, HIGH);
+    delay(MIN_PRESS_TIME);
 
-    nonce = getRandomNumber();
-    //Serial.print(F("Sending nonce: "));
-    radio.write(nonce, 32);
+    //wait until button released, or bail out
+    while(micros() - started_pressing_at < MAX_PRESS_TIME ){            // If waited longer than MAX_PRESS_TIME, dont count as double click
+      if (digitalRead(buttonPin)==LOW) {
+        singlePress=true;
+        started_pressing_at=micros();
+        break;
+      }
+    }
 
-    radio.startListening();
-    //printHash(nonce);
+    //wait for second click
+    if (singlePress){
+      delay(MIN_PRESS_TIME);
 
-    started_waiting_at = micros();               // Set up a timeout period, get the current microseconds
-    while (!radio.available() ){                             // While nothing is received
-      if (micros() - started_waiting_at > MAX_TIME ){            // If waited longer than 2000ms, indicate timeout and exit while loop
-          timeout = true;
+      while(micros() - started_pressing_at < MAX_PRESS_TIME ){            // If waited longer than MAX_PRESS_TIME, dont count as double click
+        if (digitalRead(buttonPin)==HIGH) {
+          doublePress=true;
           break;
+        }
       }
     }
 
-   //digitalWrite(ledPin, LOW);
+    delay(MIN_PRESS_TIME);
 
-   if(timeout){
-      radio.stopListening();
-      //Serial.println("Command timed out...");
-   }else{
-      // Read the challenge
-      radio.read(challenge, 32);
+    if (doublePress && digitalRead(buttonPin)==LOW){
 
-      timer = micros();
-      //Serial.print(F("Got challenge "));
-      //printHash(challenge);
-      //Serial.print(F(" round-trip delay: "));
-      //Serial.print(timer-time);
-      //Serial.println(F(" microseconds"));
-
-      radio.stopListening();
-
-      //process challenge and return
-      //init HMAC - it is important to do this every time, otherwise it incorporates previous hashes, making transmitter and receiver go out of sync
-      Sha256.initHmac(hmacKey,64);
-      int i=0;
-      for (i=0; i<32; i++) {
-        Sha256.print(nonce[i]);
-        Sha256.print(challenge[i]);
+      //power up radio
+      radio.powerUp();
+  
+      /*** Do stuff when woken up ***/
+      unsigned long time = micros();                          // Record the current microsecond count
+      //digitalWrite(ledPin, HIGH);
+  
+      nonce = getRandomNumber();
+      //Serial.print(F("Sending nonce: "));
+      radio.write(nonce, 32);
+  
+      radio.startListening();
+      //printHash(nonce);
+  
+      started_waiting_at = micros();               // Set up a timeout period, get the current microseconds
+      while (!radio.available() ){                             // While nothing is received
+        if (micros() - started_waiting_at > MAX_TIME ){            // If waited longer than 2000ms, indicate timeout and exit while loop
+            timeout = true;
+            break;
+        }
       }
-      response = Sha256.resultHmac();
-
-      radio.write(response, 32);
-      //Serial.print(F("Provided response "));
-      //printHash(response);
-    }
-
-    timeout = false;
+  
+     //digitalWrite(ledPin, LOW);
+  
+     if(timeout){
+        radio.stopListening();
+        //Serial.println(F("Command timed out..."));
+     }else{
+        // Read the challenge
+        radio.read(challenge, 32);
+  
+        timer = micros();
+        //Serial.print(F("Got challenge "));
+        //printHash(challenge);
+        //Serial.print(F(" round-trip delay: "));
+        //Serial.print(timer-time);
+        //Serial.println(F(" microseconds"));
+  
+        radio.stopListening();
+  
+        //process challenge and return
+        //init HMAC - it is important to do this every time, otherwise it incorporates previous hashes, making transmitter and receiver go out of sync
+        Sha256.initHmac(hmacKey,64);
+        int i=0;
+        for (i=0; i<32; i++) {
+          Sha256.print(nonce[i]);
+          Sha256.print(challenge[i]);
+        }
+        response = Sha256.resultHmac();
+  
+        radio.write(response, 32);
+        //Serial.print(F("Provided response "));
+        //printHash(response);
+      }
+  
+      timeout = false;
+      
+    } 
 }
 
 /*
@@ -191,6 +245,14 @@ void printHash(uint8_t* hash) {
 }
 */
 
+/*
+ * Using built-in random function, seeded with analogRead.
+ * This is a poor way of seeding, as analogRead has a fairly low variation.
+ * I.e. the pseudo generated random numbers will be fairly predictable
+ * Not a problem in our use case, as the strong random number is coming from the receiver
+ * and the transmitter random number serves as a nonce (unique value)
+ * to avoid repetition of (transmitter nonce,receiver challenge) tuple.
+ */
 uint8_t* getRandomNumber(){
   // Using a basic whitening technique that takes the first byte of a new random value and builds up a 32-byte random value
   // This 32-byte random value is then hashed (SHA256) to produce the resulting nonce
